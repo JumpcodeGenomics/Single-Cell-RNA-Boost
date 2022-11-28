@@ -1,0 +1,306 @@
+---
+title: "CRISPRClean Data Analysis Using R"
+output:
+  html_document: default
+date: '2022-11-15'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+## Import both control and depleted samples
+
+We are going to be using the Seurat toolkit for this downstream analysis. First we will load Seurat and import our samples in .h5 format
+
+```{r Seurat}
+library(Seurat)
+pbmc_control.mtx <- Read10X_h5("~/R/control_filtered_no_mask.h5")
+pbmc_depleted.mtx <- Read10X_h5("~/R/depleted_filtered_no_mask_rep3.h5")
+```
+
+## Create a Seurat Object
+
+Keep cells expressing a minimum of 200 features. Keep genes expressed in a minimum of 3 cells.
+
+```{r Create Seurat object}
+pbmc_control.so <- CreateSeuratObject(pbmc_control.mtx, min.cells = 3, min.features = 200, project = "10X-V3")
+pbmc_depleted.so <- CreateSeuratObject(pbmc_depleted.mtx, min.cells = 3, min.features = 200, project = "CRISPRClean")
+```
+
+## Calculate percentage of UMI's contributed by mitochondrial genes
+
+We will look at violin plots of UMIs/cell, Genes/cell, and Mito reads/cell
+We will also look at a feature scatter plot showing how percentage of mito reads relates to # of genes/cell
+```{r Percentage of features}
+#control sample
+#percent mito
+pbmc_control.so <- PercentageFeatureSet(pbmc_control.so, pattern = "^MT-", col.name = 'percent.mt')
+#percent ribo
+pbmc_control.so <- PercentageFeatureSet(pbmc_control.so, pattern = "^RP[SL][[:digit:]]|^RPLP[[:digit:]]|^RPSA", col.name = 'percent.rb')
+
+#fraction of mito and ribo reads per cell
+VlnPlot(pbmc_control.so, features = c('percent.mt','percent.rb'), group.by = 'orig.ident')
+
+FeatureScatter(pbmc_control.so, feature1 = 'nFeature_RNA', feature2 = 'percent.mt', group.by = 'orig.ident')
+
+#depleted sample
+#percent mito
+pbmc_depleted.so <- PercentageFeatureSet(pbmc_depleted.so, pattern = "^MT-", col.name = 'percent.mt')
+#percent ribo
+pbmc_depleted.so <- PercentageFeatureSet(pbmc_depleted.so, pattern = "^RP[SL][[:digit:]]|^RPLP[[:digit:]]|^RPSA", col.name = 'percent.rb')
+
+VlnPlot(pbmc_depleted.so, features = c('percent.mt','percent.rb'), group.by = 'orig.ident')
+
+FeatureScatter(pbmc_depleted.so, feature1 = 'nFeature_RNA', feature2 = 'percent.mt', group.by = 'orig.ident')
+```
+
+we can see that we removed a large fraction of mito and ribo reads with depletion
+
+## Using miQC for identifying dead cells based on mitochondiral content
+
+We will attempt to build a flexmix model using MiQC (Hippen et. al., 2021) to filter low quality/dead cells. If this flexmix model fails to build (not a high proportion of dead cells) we will then keep cells in the 95th percentile of % mitochondrial reads
+
+```{r miQC control}
+library(SeuratWrappers)
+#control sample
+pbmc_control.so <- RunMiQC(pbmc_control.so, percent.mt = 'percent.mt', backup.option = 'percentile', backup.percentile = 0.95)
+table(pbmc_control.so$miQC.keep)
+```
+
+We were unable to build flexmix model for this sample, but that's okay. We filter cells based on being within the 95th percentile of fraction of mitochondrial reads
+
+We want to keep the filtering consistent, so we will filter the 95th percentile in the depleted sample as well
+
+```{r miQC depleted}
+library(dplyr)
+pbmc_depleted.so@meta.data <- pbmc_depleted.so@meta.data %>% mutate(miQC.keep = ifelse(test = pbmc_depleted.so@meta.data$percent.mt <= quantile(pbmc_depleted.so@meta.data$percent.mt, probs = 0.95), yes = 'keep', no = 'discard'))
+table(pbmc_depleted.so$miQC.keep)
+```
+
+We can see that we are removing approximately the same number of dead cells in both the control and depleted condition
+
+## Filter dead cells
+
+```{r Filter dead cells}
+#control
+ncol(pbmc_control.so)
+pbmc_control.so <- pbmc_control.so[, pbmc_control.so@meta.data[, "miQC.keep"] == 'keep']
+ncol(pbmc_control.so)
+
+#depleted
+ncol(pbmc_depleted.so)
+pbmc_depleted.so <- pbmc_depleted.so[, pbmc_depleted.so@meta.data[, "miQC.keep"] == 'keep']
+ncol(pbmc_depleted.so)
+```
+
+## Doublet Removal
+
+We are going to use the doublet removal toolkit scDblFinder (Germain et. al., 2022). We first need to go through an initial round of clustering to simulate artificial doublets and subsequent removal
+
+For clustering, we are going to use the SCTransform workflow
+We want to perform clustering using residual default cutoff of 1.3 rather than selecting a fixed number of highly variable genes. We will also be regressing out the percentage of mito reads so as to not affect clustering
+
+We will also be scoring cell cycle genes to eventually regress out as well
+
+#### initial control clustering
+```{r initial clustering control}
+#SCTransform
+pbmc_control.so <- SCTransform(pbmc_control.so, variable.features.n = NULL, variable.features.rv.th = 1.3, vars.to.regress = 'percent.mt')
+#cell cyclce scoring
+pbmc_control.so <- CellCycleScoring(pbmc_control.so, s.features = cc.genes.updated.2019$s.genes, g2m.features = cc.genes.updated.2019$g2m.genes)
+#PCA
+pbmc_control.so <- RunPCA(pbmc_control.so)
+#Find k-nearest neighbors using the first 30 dimensions
+pbmc_control.so <- FindNeighbors(pbmc_control.so, dims = 1:30)
+#generate UMAP coordinates
+pbmc_control.so <- RunUMAP(pbmc_control.so, dims = 1:30)
+#Find clusters using the louvain algorithm with multilevel refinement. It is recommended to overcluster the data first when using scDblFinder
+pbmc_control.so <- FindClusters(pbmc_control.so, resolution = 1.2, algorithm = 2)
+
+```
+
+#### initial depleted clustering 
+```{r initial clustering depleted}
+#SCTransform
+pbmc_depleted.so <- SCTransform(pbmc_depleted.so, variable.features.n = NULL, variable.features.rv.th = 1.3, vars.to.regress = 'percent.mt')
+#cell cyclce scoring
+pbmc_depleted.so <- CellCycleScoring(pbmc_depleted.so, s.features = cc.genes.updated.2019$s.genes, g2m.features = cc.genes.updated.2019$g2m.genes)
+#PCA
+pbmc_depleted.so <- RunPCA(pbmc_depleted.so)
+#Find k-nearest neighbors using the first 30 dimensions
+pbmc_depleted.so <- FindNeighbors(pbmc_depleted.so, dims = 1:30)
+#generate UMAP coordinates
+pbmc_depleted.so <- RunUMAP(pbmc_depleted.so, dims = 1:30)
+#Find clusters using the louvain algorithm with multilevel refinement. It is recommended to overcluster the data first when using scDblFinder
+pbmc_depleted.so <- FindClusters(pbmc_depleted.so, resolution = 1.2, algorithm = 2)
+```
+
+### scDblFinder
+
+we use the natural log normalized features to simulate artificial doublets. The number of top features corresponds to the number of highly variable genes. We are also using the same number of dimensions (30) used in the first clustering iterations. The expected doublet rate is assumed to be 1% per thousand cells captured which is appropriate for 10x datasets.
+
+```{r doublet finder control}
+library(scDblFinder)
+library(SingleCellExperiment)
+#natural log normalize the raw counts data. SCTransform counts data uses pearson residuals which can only be used for clustering/visualization
+pbmc_control.so <- NormalizeData(pbmc_control.so, assay = 'RNA')
+#run scdblfinder
+scdblfinder.control <- scDblFinder(as.SingleCellExperiment(pbmc_control.so, assay = 'RNA'), clusters = 'seurat_clusters', 
+                                dbr = NULL, nfeatures = length(pbmc_control.so@assays$SCT@var.features),
+                                dims = 30, includePCs = 30, processing = "normFeatures")
+```
+
+```{r doublet finder depleted}
+#natural log normalize the raw counts data. SCTransform counts data uses pearson residuals which can only be used for clustering/visualization
+pbmc_depleted.so <- NormalizeData(pbmc_depleted.so, assay = 'RNA')
+#run scdblfinder
+scdblfinder.depleted <- scDblFinder(as.SingleCellExperiment(pbmc_depleted.so, assay = 'RNA'), clusters = 'seurat_clusters', 
+                                dbr = NULL, nfeatures = length(pbmc_depleted.so@assays$SCT@var.features),
+                                dims = 30, includePCs = 30, processing = "normFeatures")
+```
+
+scDblFinder creates a SingleCellExperiment object with a metadata column 'dblFinder_class' containing the 'singlet' or 'doublet' call information per cell. We will extract this column from the SingleCellExperiment object and add it to our seurat object.
+
+We will also look at both DimPlots and violin plots as a QC metric to ensure that the called doublets meet 2 requirements: On average doublets should have approximately twice the UMI/cell and genes/cell
+
+```{r doublet QC}
+#control
+pbmc_control.so@meta.data$dblFinder_class <- scdblfinder.control$scDblFinder.class
+table(pbmc_control.so@meta.data$dblFinder_class)
+DimPlot(pbmc_control.so, group.by = "dblFinder_class", order = T)
+VlnPlot(pbmc_control.so, features = c("nCount_RNA", "nFeature_RNA"), group.by = "dblFinder_class")
+
+#depleted
+pbmc_depleted.so@meta.data$dblFinder_class <- scdblfinder.depleted$scDblFinder.class
+table(pbmc_depleted.so@meta.data$dblFinder_class)
+DimPlot(pbmc_depleted.so, group.by = "dblFinder_class", order = T)
+VlnPlot(pbmc_depleted.so, features = c("nCount_RNA", "nFeature_RNA"), group.by = "dblFinder_class")
+```
+
+We can see that the called doublets represent distinct populations within some clusters. Additionally, the number of UMIs/cell and genes/cell is roughly twice as much which gives us confidence in the accuracy of called doublets
+
+We will now remove these cells called as doublets from the Seurat object
+We are also going to look at what the distribution of UMIs/cell and genes/cell looks like after doublet removal
+
+```{r doublet removal}
+#control
+pbmc_control.so <- pbmc_control.so[, pbmc_control.so@meta.data[, "dblFinder_class"] == "singlet"]
+VlnPlot(pbmc_control.so, features = c('nCount_RNA','nFeature_RNA'), group.by = 'orig.ident')
+ncol(pbmc_control.so)
+
+#depleted
+pbmc_depleted.so <- pbmc_depleted.so[, pbmc_depleted.so@meta.data[, "dblFinder_class"] == "singlet"]
+VlnPlot(pbmc_depleted.so, features = c('nCount_RNA','nFeature_RNA'), group.by = 'orig.ident')
+ncol(pbmc_depleted.so)
+```
+
+After doublet removal, we can see we still have some cells with outlier UMI counts. These could be homotypic doublets or possibly introduce some unwanted variation for cell clustering. Given that there are very few, we will be conservative and filter cells in the top 1% of UMI counts
+
+As a result, we will create a new metadata dataframe with some key metrics
+
+```{r additional QC control}
+
+pbmc_control.meta <- pbmc_control.so@meta.data
+#we are going to add two columns: One column for cells with high sequencing depth and another column quantifying the complexity of each cell
+
+pbmc_control.meta <- pbmc_control.meta %>% mutate(highdepth = ifelse(test = pbmc_control.meta$nCount_RNA <= quantile(pbmc_control.meta$nCount_RNA, probs = 0.99), yes = 'keep', no = 'discard'), complexity = log10(pbmc_control.meta$nFeature_RNA)/log10(pbmc_control.meta$nCount_RNA)) 
+
+#add new metadata to Seurat object
+pbmc_control.so@meta.data <- pbmc_control.meta
+
+#for now let's remove the cells with high sequencing depth
+table(pbmc_control.so@meta.data$highdepth)
+pbmc_control.so <- pbmc_control.so[, pbmc_control.so@meta.data[, "highdepth"] == "keep"]
+ncol(pbmc_control.so)
+```
+
+```{r additional QC depleted}
+pbmc_depleted.meta <- pbmc_depleted.so@meta.data
+#we are going to add two columns: One column for cells with high sequencing depth and another column quantifying the complexity of each cell
+
+pbmc_depleted.meta <- pbmc_depleted.meta %>% mutate(highdepth = ifelse(test = pbmc_depleted.meta$nCount_RNA <= quantile(pbmc_depleted.meta$nCount_RNA, probs = 0.99), yes = 'keep', no = 'discard'), complexity = log10(pbmc_depleted.meta$nFeature_RNA)/log10(pbmc_depleted.meta$nCount_RNA)) 
+
+#add new metadata to Seurat object
+pbmc_depleted.so@meta.data <- pbmc_depleted.meta
+
+#for now let's remove the cells with high sequencing depth
+table(pbmc_depleted.so@meta.data$highdepth)
+pbmc_depleted.so <- pbmc_depleted.so[, pbmc_depleted.so@meta.data[, "highdepth"] == "keep"]
+ncol(pbmc_depleted.so)
+```
+
+
+## Checking cell cycle scoring of cells
+
+```{r cell cycling}
+#change the default assay to RNA
+DefaultAssay(pbmc_control.so) = 'RNA'
+DefaultAssay(pbmc_depleted.so) = 'RNA'
+
+#we quantified cells is S and G2 phase earlier, so we will look to see the proportion of cycling cells
+pbmc_control.so$cc.difference <- pbmc_control.so$S.Score - pbmc_control.so$G2M.Score
+VlnPlot(pbmc_control.so, features = c('S.Score','G2M.Score','cc.difference'), group.by = 'orig.ident')
+
+pbmc_depleted.so$cc.difference <- pbmc_depleted.so$S.Score - pbmc_depleted.so$G2M.Score
+VlnPlot(pbmc_depleted.so, features = c('S.Score','G2M.Score','cc.difference'), group.by = 'orig.ident')
+
+```
+We can see that there are very few cells in the cycling phase. As a result, we can choose to regress out cell cycle related influence.
+
+## 2nd round of clustering 
+we will proceed with clustering as we did before, with a few slight modifications
+In the vars.to.regress, we are going to regress out percent mito as well as percent ribosomal.
+We are also regressing out cell cycle influence which is dependent upon the experiment at hand. If we wanted to regress out G1 phase cells from cycling cells, we would use 'cc.difference' to regress out. However, in this example, we are regressing out all cell cycle influence.
+```{r 2nd clustering control}
+library(ggplot2)
+#SCTransform and regress out percent mito and cell cycle score
+pbmc_control.so <- SCTransform(pbmc_control.so, variable.features.n = NULL, variable.features.rv.th = 1.3, vars.to.regress = c('percent.mt','S.Score','G2M.Score','percent.rb'))
+#PCA
+pbmc_control.so <- RunPCA(pbmc_control.so)
+#we can quantitately measure the optimal number of PCAs to use for downstream analysis
+pct <- pbmc_control.so[['pca']]@stdev / sum(pbmc_control.so[['pca']]@stdev) * 100
+cumu <- cumsum(pct)
+sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+#Find k-nearest neighbors using the first 30 dimensions. For now, we will use 30 dimensions which is the default setting and generally provides good clustering results. However, we can always reanalyze clustering results with the calculated number
+pbmc_control.so <- FindNeighbors(pbmc_control.so, dims = 1:30)
+#generate UMAP coordinates
+pbmc_control.so <- RunUMAP(pbmc_control.so, dims = 1:30)
+#iteratively find clusters at a range of resolutions to be stored in metadata
+pbmc_control.so <- FindClusters(pbmc_control.so, resolution = seq(0.05,1,0.05), algorithm = 2)
+#normalize raw counts data
+pbmc_control.so <- NormalizeData(pbmc_control.so, assay = 'RNA')
+#visualize UMAP and pick a resolution to use from column of dataframe
+DimPlot(pbmc_control.so, label = T, pt.size = 1, group.by = 'SCT_snn_res.0.4') + theme_classic() + ggtitle('10X-V3')
+#total number of clusters
+length(table(pbmc_control.so@meta.data$SCT_snn_res.0.4))
+```
+
+```{r 2nd clustering depleted}
+#SCTransform and regress out percent mito and cell cycle score
+pbmc_depleted.so <- SCTransform(pbmc_depleted.so, variable.features.n = NULL, variable.features.rv.th = 1.3, vars.to.regress = c('percent.mt','S.Score','G2M.Score','percent.rb'))
+#PCA
+pbmc_depleted.so <- RunPCA(pbmc_depleted.so)
+#we can quantitately measure the optimal number of PCAs to use for downstream analysis
+pct <- pbmc_depleted.so[['pca']]@stdev / sum(pbmc_depleted.so[['pca']]@stdev) * 100
+cumu <- cumsum(pct)
+sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+#Find k-nearest neighbors using the first 30 dimensions. For now, we will use 30 dimensions which is the default setting and generally provides good clustering results. However, we can always reanalyze clustering results with the calculated number
+pbmc_depleted.so <- FindNeighbors(pbmc_depleted.so, dims = 1:30)
+#generate UMAP coordinates
+pbmc_depleted.so <- RunUMAP(pbmc_depleted.so, dims = 1:30)
+#iteratively find clusters at a range of resolutions to be stored in metadata
+pbmc_depleted.so <- FindClusters(pbmc_depleted.so, resolution = seq(0.05,1,0.05), algorithm = 2)
+#normalize raw counts data
+pbmc_depleted.so <- NormalizeData(pbmc_depleted.so, assay = 'RNA')
+#visualize UMAP and pick a resolution to use from column of dataframe
+DimPlot(pbmc_depleted.so, label = T, pt.size = 1, group.by = 'SCT_snn_res.0.4') + theme_classic() + ggtitle('CRISPRClean')
+#total number of clusters
+length(table(pbmc_depleted.so@meta.data$SCT_snn_res.0.5))
+```
+
+we can see that we obtain 4 more additional clusters after depletion!
