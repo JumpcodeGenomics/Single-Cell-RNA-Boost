@@ -6,21 +6,21 @@ CRISPRClean Data Analysis Using R
 
 We first want to assess some basic metrics such as UMIs/cell and
 Genes/cell and assess how much more transcriptomic information we are
-capturing with CRISPRClean
+capturing with CRISPRclean
 
 We created a series of functions to assist with the workflow in
-assessing benefits of depletion!
+assessing the benefits of depletion.
 
-All you will need is the .h5 files for control (10X-V3) and depleted
+All that you will need is the .h5 files for control (10X-V3) and depleted
 (CRISPRClean). Alternatively, you can use a directory containing the
-barcodes.tsv, genes.tsv, and matrix.mtx file
+barcodes.tsv, genes.tsv, and matrix.mtx files.
 
 You will also need the gene target list provided by Jumpcode Genomics.
 Because we are targeting \~350 genes, the UMIs associated with these
 genes will have been removed from the library. As a result, we want to
 compare the UMIs/cell for genes that have not been targeted with CRISPR
 to fairly assess how UMIs are being redistributed to other informative
-genes
+genes. This can be downloaded in the same repository.
 
 ### UMIs and Genes per cell
 
@@ -70,57 +70,7 @@ depletion_benefit(control = control, depleted = depleted)
 
 ![](jumpcode_Rcode_files/figure-gfm/UMIs%20and%20Genes%20per%20cell-1.png)<!-- -->
 Here we can see a clear benefit in depletion via a boost in both
-UMIs/cell and Genes/cell!
-
-We will now proceed with an off-target analysis
-
-### Goodness-of-fit Linear Correlation
-
-Next we are going to verify that we see minimal off-targets
-
-``` r
-#call the pseudobulk_expression function
-#this will pseudbulk the expression of each gene across all cells to compare between control and depleted
-
-#control
-control <- pseudobulk_expression(matrix = "~/R/control_filtered_no_mask.h5", gene_list = "~/targets.txt", sample = "10x-v3")
-
-#depleted
-depleted <- pseudobulk_expression(matrix = "~/R/depleted_filtered_no_mask_rep3.h5", gene_list = "~/targets.txt", sample = "CRISPRClean")
-
-#linear regression
-goodness_of_fit(control = control, depleted = depleted)
-```
-
-    ## Loading required package: purrr
-
-    ## Loading required package: ggpmisc
-
-    ## Warning: package 'ggpmisc' was built under R version 4.2.1
-
-    ## Loading required package: ggpp
-
-    ## Warning: package 'ggpp' was built under R version 4.2.1
-
-    ## 
-    ## Attaching package: 'ggpp'
-
-    ## The following object is masked from 'package:ggplot2':
-    ## 
-    ##     annotate
-
-    ## Warning: Removed 20540 rows containing missing values (geom_text).
-
-![](jumpcode_Rcode_files/figure-gfm/goodness%20of%20fit-1.png)<!-- -->
-
-Genes highlighted in blue fall above the unity line and are enriched
-with CRISPRClean
-
-We see there are very few genes with variation \>40% from the
-theoretical residuals indicating a sound goodness of fit.
-
-We can now proceed to further downstream analysis after confirming a
-benefit with CRISPRClean
+UMIs/cell and Genes/cell
 
 ## Import both control and depleted samples
 
@@ -1141,13 +1091,6 @@ DimPlot(pbmc_control.so, label = T, pt.size = 1, group.by = 'SCT_snn_res.0.4') +
 ![](jumpcode_Rcode_files/figure-gfm/2nd%20clustering%20control-1.png)<!-- -->
 
 ``` r
-#total number of clusters
-length(table(pbmc_control.so@meta.data$SCT_snn_res.0.4))
-```
-
-    ## [1] 14
-
-``` r
 #SCTransform and regress out percent mito and cell cycle score
 pbmc_depleted.so <- SCTransform(pbmc_depleted.so, variable.features.n = NULL, variable.features.rv.th = 1.3, vars.to.regress = c('percent.mt','S.Score','G2M.Score','percent.rb'), verbose = F)
 #PCA
@@ -1428,12 +1371,3 @@ DimPlot(pbmc_depleted.so, label = T, pt.size = 1, group.by = 'SCT_snn_res.0.4') 
 ```
 
 ![](jumpcode_Rcode_files/figure-gfm/2nd%20clustering%20depleted-1.png)<!-- -->
-
-``` r
-#total number of clusters
-length(table(pbmc_depleted.so@meta.data$SCT_snn_res.0.5))
-```
-
-    ## [1] 19
-
-we can see that we obtain 4 more additional clusters after depletion!
