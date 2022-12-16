@@ -1,4 +1,4 @@
-CRISPRClean Data Analysis Using R
+CRISPRclean Data Analysis Using R
 ================
 2022-12-02
 
@@ -60,7 +60,7 @@ control <- umis_genes_per_cell(matrix = "~/R/control_filtered_no_mask.h5", gene_
 
 ``` r
 #depleted
-depleted <- umis_genes_per_cell(matrix = "~/R/depleted_filtered_no_mask_rep3.h5", gene_list = "~/targets.txt", sample = "CRISPRClean")
+depleted <- umis_genes_per_cell(matrix = "~/R/depleted_filtered_no_mask_rep3.h5", gene_list = "~/targets.txt", sample = "CRISPRclean")
 
 #plot histogram of UMIs and genes/cell
 depletion_benefit(control = control, depleted = depleted)
@@ -90,7 +90,7 @@ a minimum of 3 cells.
 
 ``` r
 pbmc_control.so <- CreateSeuratObject(pbmc_control.mtx, min.cells = 3, min.features = 200, project = "10X-V3")
-pbmc_depleted.so <- CreateSeuratObject(pbmc_depleted.mtx, min.cells = 3, min.features = 200, project = "CRISPRClean")
+pbmc_depleted.so <- CreateSeuratObject(pbmc_depleted.mtx, min.cells = 3, min.features = 200, project = "CRISPRclean")
 ```
 
 ## Calculate percentage of UMI’s contributed by mitochondrial genes
