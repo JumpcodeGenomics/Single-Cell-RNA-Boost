@@ -1367,7 +1367,7 @@ pbmc_depleted.so <- FindClusters(pbmc_depleted.so, resolution = seq(0.05,1,0.05)
 #normalize raw counts data
 pbmc_depleted.so <- NormalizeData(pbmc_depleted.so, assay = 'RNA')
 #visualize UMAP and pick a resolution to use from column of dataframe
-DimPlot(pbmc_depleted.so, label = T, pt.size = 1, group.by = 'SCT_snn_res.0.4') + theme_classic() + ggtitle('CRISPRClean')
+DimPlot(pbmc_depleted.so, label = T, pt.size = 1, group.by = 'SCT_snn_res.0.4') + theme_classic() + ggtitle('CRISPRclean')
 ```
 
 ![](jumpcode_Rcode_files/figure-gfm/2nd%20clustering%20depleted-1.png)<!-- -->
