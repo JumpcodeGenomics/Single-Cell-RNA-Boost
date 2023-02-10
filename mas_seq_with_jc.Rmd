@@ -1,0 +1,508 @@
+---
+title: "scRNA-seq Analyis Using MAS-Seq with CRISPRClean"
+output: 
+  github_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+date: '2022-12-02'
+---
+
+<style type="text/css">
+  body{
+  font-size: 14pt;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Plotting median UMIs/cell and Genes/cell
+
+We first want to assess some basic metrics such as UMIs/cell and Genes/cell to assess the gain in transcriptomic read information of untargeted genes.
+
+We created a series of functions to assist with the workflow in assessing benefits of depletion.
+
+You will use a directory containing the barcodes.tsv, genes.tsv, and matrix.mtx file as output from PacBio's Pigeon toolkit.
+
+You will also need the gene target list provided by Jumpcode Genomics. Because we are targeting ~350 genes for removal, we experimentally remove UMIs associated with the targeted transcripts. We want to evaluate how reads are being redistributed for genes that have not been targeted with CRISPR. Thus, we should see a boost in both UMIs/cell and Genes/cell when considering all non-targeted transcripts. 
+
+```{r UMIs and Genes per cell function}
+#We are first going to create a function to evaluate both umis/cell and genes/cell for each sample
+umis_genes_per_cell <- function(matrix, gene_list, sample) {
+    x<-c("Seurat", "dplyr", "patchwork")
+    lapply(x, require, character.only = TRUE)
+    if(dir.exists(paths = matrix)) {
+        mtx <- Read10X(matrix)
+    }
+    if(file.exists(gene_list)) {
+      targets <- read.delim("~/targets.txt", header = F)
+      targets <- targets$V1
+    }
+    #remove the targeted genes from the control matrix file
+    matrix.removed.genes <- mtx[!rownames(mtx) %in% targets, ]
+    
+    #here we only consider genes that are expressed in at least 5 cells
+    keep <- rowSums(matrix.removed.genes>0)>=5
+    matrix.removed.genes <- matrix.removed.genes[keep,]
+    
+    #create a dataframe to plot umis/cell
+    df <- as.data.frame(colSums(matrix.removed.genes))
+    df <- df %>% dplyr::rename(c("umi_counts"=1)) %>% mutate(gene_counts = colSums(matrix.removed.genes>0), condition = sample)
+}
+```
+
+
+```{r creating control and depleted dataframes}
+#matrix = PATH to directory containing barcodes.tsv, genes.tsv, and matrix.mtx from PacBio pipeline generating Seurat inputs
+#gene list = gene list provided by Jumpcode containing gene targets
+#sample = whichever name you would like to name the conditions to compare (i.e., MAS-Seq vs Jumpcode Depletion)
+
+#control
+control_dirs <- c("~/R/mas_seq/control3_genes_seurat/mas_untreated_genes_seurat/genes_seurat/")
+
+control <- umis_genes_per_cell(matrix = control_dirs, gene_list = "~/targets.txt", sample = "MAS-Seq")
+
+#depleted
+depleted_dirs <- c("~/R/mas_seq/depleted3_genes_seurat/mas_treated_genes_seurat/genes_seurat/")
+
+depleted <- umis_genes_per_cell(matrix = depleted_dirs, gene_list = "~/targets.txt", sample = "MAS-Seq + JC")
+```
+
+
+```{r function to plot umis/cell and genes/cell}
+#plot histogram of UMIs and genes/cell
+depletion_benefit <- function(control,depleted) {
+    require("ggplot2")
+    df.m <- rbind(control, depleted)
+    median <- df.m %>% dplyr::group_by(condition) %>% dplyr::summarize(median_umi=median(umi_counts), median_genes=median(gene_counts))
+    
+    p1 <- ggplot(df.m, aes(x =umi_counts , fill=condition, ..scaled..)) + geom_density(alpha=0.2) + 
+        xlab("nUMIs/cell") + ylab("Scaled Density") + xlim(0,median(df.m$umi_counts) + 8*mad(df.m$umi_counts)) +
+        geom_vline(data = median, aes(xintercept = median_umi, color=condition), linetype='dashed') + geom_text(data = median, aes(x = round(median(df.m$umi_counts) + 1*mad(df.m$umi_counts)), y = c(1,0.9), label=paste0(condition, ":", median_umi), color=condition), size=4, hjust=0, fontface=2, show.legend = F)
+        
+      #this will generate plot comparing genes/cell
+    p2 <- ggplot(df.m, aes(x =gene_counts , fill=condition, ..scaled..)) + geom_density(alpha=0.2) + 
+        xlab("nGenes/cell") + ylab(NULL) +
+        geom_vline(data = median, aes(xintercept = median_genes, color=condition), linetype='dashed') + xlim(0,median(df.m$gene_counts) + 8*mad(df.m$gene_counts)) + geom_text(data = median, aes(x = round(median(df.m$gene_counts) + 1*mad(df.m$gene_counts)), y = c(1,0.9), label=paste0(condition, ":", median_genes), color=condition), size=4, hjust=0, fontface=2, show.legend = F)
+    p1 + p2 + plot_layout(guides = "collect", widths = c(2,2)) & theme(axis.text.y = element_blank(),axis.ticks.y = element_blank(), axis.title.y = element_text(size = 14), legend.position = "bottom", panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_rect(fill='white'))
+}
+```
+
+
+```{r plot the function}
+#generate the plots
+depletion_benefit(control = control, depleted = depleted)
+```
+
+Here we can see that we're boosting the reads of the untargeted transcripts of the 10x libraries.
+
+# Setup the seurat object
+
+We are going to use the Seurat toolkit to perform all subsequent downstream analysis for this tutorial.
+
+We start by reading the data using the Read10x() function which reads the directory containing the Seurat inputs generated by Pigeon: PacBio's Transcript Toolkit and generates a count matrix. We next use the count matrix to create a seurat object.
+
+```{r create counts matrices}
+library(Seurat)
+#control
+pbmc_control.mtx <- Read10X("~/R/mas_seq/control3_genes_seurat/mas_untreated_genes_seurat/genes_seurat/")
+#depleted
+pbmc_depleted.mtx <- Read10X("~/R/mas_seq/depleted3_genes_seurat/mas_treated_genes_seurat/genes_seurat/")
+```
+
+We are only going to include genes that have at least 3 total isoform counts. Later, we will use data-driven techniques to determine appropriate thresholds for filtering.
+
+```{r Create Seurat object}
+#control
+pbmc_control.so <- CreateSeuratObject(pbmc_control.mtx, min.cells = 3, project = "MAS-Seq")
+#depleted
+pbmc_depleted.so <- CreateSeuratObject(pbmc_depleted.mtx, min.cells = 3, project = "JC")
+
+#create a list containing the control and depleted conditions
+list.so <- list(pbmc_control.so,pbmc_depleted.so)
+#rename the indices of the list
+names(list.so) <- c("mas","jc")
+#remove the separate files to conserve memory
+rm(pbmc_control.so,pbmc_depleted.so)
+```
+
+# Data pre-processing and QC workflow
+
+The steps below demonstrate an example of data pre-processing and QC for scRNA-seq data generated with MAS-Seq sequencing combined with Jumpcode depletion.
+
+## Filtering low-quality cells
+
+We are going to use a data-driven technique to evaluate the number of unique genes and UMIs detected in each cell.
+
+1. Empty droplets or low-quality cells typically express few genes and have low library complexity.
+2. Doublets exhibit higher UMI and gene counts which affects downstream interpretation.
+3. The total number of genes detected corresponds linearly with unique genes. Over-sequenced cells will have a disruption in this linearity.
+
+### Scatter plot of genes vs counts
+``` {r plotting relationship between detected genes and counts control}
+library(ggplot2)
+library(ggExtra)
+library(cowplot)
+
+#control
+p1 <- ggplot(list.so$mas@meta.data, aes(x=nCount_RNA, y=nFeature_RNA)) + geom_point() + geom_smooth(method="lm") + ggtitle("MAS-Seq")
+p1 <- ggMarginal(p1, type = "histogram", fill="lightgrey")
+
+p2 <- ggplot(list.so$mas@meta.data, aes(x=log10(nCount_RNA), y=log10(nFeature_RNA))) + geom_point() + geom_smooth(method="lm")
+p2 <- ggMarginal(p2, type = "histogram", fill="lightgrey")
+
+plot_grid(plotlist = list(p1,p2), ncol=2, align='h', rel_widths = c(1, 1))
+```
+
+```{r plotting relationship between detected genes and counts depleted}
+
+#depleted 
+p1 <- ggplot(list.so$jc@meta.data, aes(x=nCount_RNA, y=nFeature_RNA)) + geom_point() + geom_smooth(method="lm") + ggtitle("MAS-Seq + JC")
+p1 <- ggMarginal(p1, type = "histogram", fill="lightgrey")
+
+p2 <- ggplot(list.so$jc@meta.data, aes(x=log10(nCount_RNA), y=log10(nFeature_RNA))) + geom_point() + geom_smooth(method="lm")
+p2 <- ggMarginal(p2, type = "histogram", fill="lightgrey")
+
+plot_grid(plotlist = list(p1,p2), ncol=2, align='h', rel_widths = c(1, 1))
+```
+
+### Remove cells with too few genes detected and cells that were sequenced too high
+
+We are going to work with log10 transformed data because it better recapitulates the linear relationship as an effect of sequencing.
+
+Using a data-driven technique, we are going use the median absolute deviation (mad) as cutoff points. Typically, this can range from 3-5 mad from the median as a cutoff. Make sure to test different options with your data to determine an appropriate cutoff based on distributions. 
+
+For this dataset, we are going to apply several thresholds:
+1. We are going to set the maximum UMI threshold to 4 mads because we do not have many cells over-sequenced (or approaching sequence saturation) as determined by the upper limit of our distribution and would like to keep as many cells for downstream analysis as possible
+2. We are going to set a minimum gene threshold to 3 mads of the gene counts/cell as evident by the long left-tail of the distribution to remove these low-quality cells
+
+```{r low quality cell removal control}
+# Gene/UMI scatter plot for control
+
+p1 <- ggplot(list.so$mas@meta.data, aes(x=log10(nCount_RNA), y=log10(nFeature_RNA))) + geom_point() + geom_smooth(method="lm") + geom_hline(aes(yintercept = median(log10(list.so$mas$nFeature_RNA)) - 3*mad(log10(list.so$mas$nFeature_RNA))), colour = "green", linetype = 2) +
+  geom_vline(aes(xintercept = median(log10(list.so$mas$nCount_RNA)) + 4*mad(log10(list.so$mas$nCount_RNA))), colour = "red", linetype = 2)
+
+ggMarginal(p1, type = "histogram", fill="lightgrey")
+```
+
+For replication purposes, we are going to apply the same thresholds to the depleted samples. Keep in mind that with depletion, by increasing counts of untargeted transcripts, we can achieve a higher sequence saturation at the same sequence depth. As a result, these thresholds can be changed depending on the experiment.
+
+```{r low quality cell removal depleted}
+# Gene/UMI scatter plot for depleted
+
+p1 <- ggplot(list.so$jc@meta.data, aes(x=log10(nCount_RNA), y=log10(nFeature_RNA))) + geom_point() + geom_smooth(method="lm") + geom_hline(aes(yintercept = median(log10(list.so$jc$nFeature_RNA)) - 3*mad(log10(list.so$jc$nFeature_RNA))), colour = "green", linetype = 2) +
+  geom_vline(aes(xintercept = median(log10(list.so$jc$nCount_RNA)) + 4*mad(log10(list.so$jc$nCount_RNA))), colour = "red", linetype = 2)
+
+ggMarginal(p1, type = "histogram", fill="lightgrey")
+```
+
+
+```{r filter low/high sequencing depth cells control}
+
+#filter the cells from the control
+
+min.gene.thresh <- median(log10(list.so$mas$nFeature_RNA)) - 3*mad(log10(list.so$mas$nFeature_RNA))
+max.umi.thresh <- median(log10(list.so$mas$nCount_RNA)) + 3*mad(log10(list.so$mas$nCount_RNA))
+
+cells.keep <- rownames(list.so$mas@meta.data %>% filter(log10(nFeature_RNA) > min.gene.thresh) %>% filter(log10(nCount_RNA) < max.umi.thresh))
+
+list.so$mas <- subset(list.so$mas, cells = cells.keep)
+```
+
+
+```{r filter low/high sequencing depth cells depleted}
+
+#filter the cells from the depleted
+
+min.gene.thresh.jc <- median(log10(list.so$jc$nFeature_RNA)) - 3*mad(log10(list.so$jc$nFeature_RNA))
+max.umi.thresh.jc <- median(log10(list.so$jc$nCount_RNA)) + 3*mad(log10(list.so$jc$nCount_RNA))
+
+cells.keep.jc <- rownames(list.so$jc@meta.data %>% filter(log10(nFeature_RNA) > min.gene.thresh.jc) %>% filter(log10(nCount_RNA) < max.umi.thresh.jc))
+
+list.so$jc <- subset(list.so$jc, cells = cells.keep.jc)
+```
+
+### Filtering low-complexity cells
+
+For this workflow, we are going to perform a QC filtering based on complexity or the ratio of Genes/UMI. Typically, dead or decaying cells will express very few genes contributing to their total UMI count. As previously mentioned, the number of genes/cell should scale with an increase in sequencing depth. As a result, cells with a library complexity outside the expected ratio are deemed lower-quality and should be removed for QC.
+
+Due to the linear relationship between the log10(UMI) and log10(gene counts), we can use a linear model to calculate the residuals in relation to the regression line. For this example, we are going to exclude cells that have residuals with >20% variance below the linear regression to exclude low complexity cells. Keep in mind that this threshold can change depending on the cell-type and experiment.
+
+``` {r plotting low complexity cells control}
+
+#control
+lm.model = lm(data = list.so$mas@meta.data, formula = log10(nFeature_RNA) ~ log10(nCount_RNA))
+list.so$mas@meta.data$residuals <- residuals(lm.model)
+list.so$mas@meta.data <- list.so$mas@meta.data %>% mutate(complexity = ifelse(test = abs(list.so$mas@meta.data$residuals) <= 0.20, yes = "high" , no = "low"))
+p2 <- ggplot(list.so$mas@meta.data, aes(x=log10(nCount_RNA), y=log10(nFeature_RNA))) + geom_point(aes(color = complexity)) + geom_abline(intercept = lm.model$coefficients[1] - 0.20 , slope = lm.model$coefficients[2], color="orange", linetype=2) + geom_smooth(method="lm")
+ggMarginal(p2, type = "histogram", fill="lightgrey")
+```
+
+``` {r plotting low complexity cells depleted}
+
+#depleted
+lm.model = lm(data = list.so$jc@meta.data, formula = log10(nFeature_RNA) ~ log10(nCount_RNA))
+list.so$jc@meta.data$residuals <- residuals(lm.model)
+list.so$jc@meta.data <- list.so$jc@meta.data %>% mutate(complexity = ifelse(test = abs(list.so$jc@meta.data$residuals) <= 0.20, yes = "high" , no = "low"))
+p2 <- ggplot(list.so$jc@meta.data, aes(x=log10(nCount_RNA), y=log10(nFeature_RNA))) + geom_point(aes(color = complexity)) + geom_abline(intercept = lm.model$coefficients[1] - 0.20 , slope = lm.model$coefficients[2], color="orange", linetype=2) + geom_smooth(method="lm")
+ggMarginal(p2, type = "histogram", fill="lightgrey")
+```
+
+We can see that we already did a good job of filtering low-complexity cells with our prior filtering, but there are a few outlier cells we are going to exclude from our further analysis
+
+```{r filter low complexity cells control}
+
+#filter the cells from the control
+
+list.so$mas <- list.so$mas[, list.so$mas@meta.data[, "complexity"] == 'high']
+
+p2 <- ggplot(list.so$mas@meta.data, aes(x=log10(nCount_RNA), y=log10(nFeature_RNA))) + geom_point() + geom_smooth(method="lm")
+ggMarginal(p2, type = "histogram", fill="lightgrey")
+
+```
+
+```{r filter low complexity cells depleted}
+
+#filter the cells from the depleted
+
+list.so$jc <- list.so$jc[, list.so$jc@meta.data[, "complexity"] == 'high']
+
+p2 <- ggplot(list.so$jc@meta.data, aes(x=log10(nCount_RNA), y=log10(nFeature_RNA))) + geom_point() + geom_smooth(method="lm")
+ggMarginal(p2, type = "histogram", fill="lightgrey")
+
+```
+
+
+Next,we are going to use the doublet removal toolkit scDblFinder (Germain et. al., 2022) to remove doublets from the data. This tool uses a machine-learning algorithm to simulate artificial doublets from the data based on cell clustering. From there, real cells get assigned a doublet score probability to which we will filter cells called as doublets. 
+
+For clustering, we are going to use the Seurat SCTransform workflow.
+
+Here, we want to perform clustering using residual default cutoff of 1.3 (default) rather than selecting a fixed number of highly variable genes.
+
+We will also be scoring cell cycle genes to observe their impact on clustering as well.
+
+## Doublet filtering
+
+### clustering using SCTransform workflow
+
+```{r initial clustering}
+#SCTransform
+list.so <- lapply(X = list.so, FUN = function(x) {
+  x <- SCTransform(x, variable.features.n = NULL, variable.features.rv.th = 1.3, verbose = F)
+})
+
+#cell cyclce scoring
+list.so <- lapply(X = list.so, FUN = function(x) {
+  x <- CellCycleScoring(x, s.features = cc.genes.updated.2019$s.genes, g2m.features = cc.genes.updated.2019$g2m.genes)
+})
+
+#PCA
+list.so <- lapply(X = list.so, FUN = function(x) {
+  x <- RunPCA(x, assay = "SCT")
+})
+
+#generate UMAP coordinates
+list.so <- lapply(X = list.so, FUN = function(x) {
+  x <- RunUMAP(x, dims = 1:30)
+})
+
+#find k-nearest neighbors
+list.so <- lapply(X = list.so, FUN = function(x) {
+  x <- FindNeighbors(x, dims = 1:30)
+})
+
+#Find clusters using the louvain algorithm with multilevel refinement. It is recommended to overcluster the data first when using scDblFinder
+list.so <- lapply(X = list.so, FUN = function(x) {
+  x <- FindClusters(x, resolution = 1.2, algorithm = 2)
+})
+```
+
+### scDblFinder doublet calling 
+
+We use the natural log normalized features to simulate artificial doublets. The expected doublet rate is assumed to be 1% per thousand cells captured which is appropriate for 10x datasets.
+
+```{r scDblFinder}
+library(scDblFinder)
+library(SingleCellExperiment)
+
+#natural log normalize the raw counts data. SCTransform counts data uses pearson residuals which can only be used for clustering/visualization
+list.so <- lapply(X = list.so, FUN = function(x) {
+  x <- NormalizeData(x, assay = 'RNA')
+}) 
+
+#Run scDblFinder. We have to first convert to a single cell experiment object for this tool
+mas <- as.SingleCellExperiment(list.so$mas, assay = 'RNA')
+
+jc <- as.SingleCellExperiment(list.so$jc, assay = 'RNA')
+
+#convert to a list
+list.dbr <- list(mas,jc)
+
+rm(mas,jc)
+
+d <- lapply(list.dbr, FUN = function(x) {
+  x <- scDblFinder(x, clusters = 'seurat_clusters', dbr = NULL, dims = 30, includePCs = 30, returnType = "table", processing = "normFeatures", nfeatures = 2000)
+})
+```
+
+For cells called doublets, we should see twice the amount of UMI counts and more genes/cell. We have view this with Violin plots to check the doublet calls.
+
+```{r doublet calls control}
+#plotting control doublet calls
+list.so$mas$class <- as.data.frame(d[[1]]) %>% filter(type == "real") %>% select(class)
+list.so$mas$class <- as.factor(list.so$mas$class)
+list.so$mas$class <- factor(list.so$mas$class, levels = c("singlet","doublet"))
+
+DimPlot(list.so$mas, group.by = c("class"), order = T)
+VlnPlot(list.so$mas, features = c("nCount_RNA", "nFeature_RNA"), group.by = "class")
+```
+
+```{r doublet calls depleted}
+#plotting depleted doublet calls
+list.so$jc$class <- as.data.frame(d[[2]]) %>% filter(type == "real") %>% select(class)
+list.so$jc$class <- as.factor(list.so$jc$class)
+list.so$jc$class <- factor(list.so$jc$class, levels = c("singlet","doublet"))
+
+DimPlot(list.so$jc, group.by = c("class"), order = T)
+VlnPlot(list.so$jc, features = c("nCount_RNA", "nFeature_RNA"), group.by = "class")
+```
+
+The doublet call information looks like what we would expect. Nowe we will filter these cells from each sample.
+
+```{r doublet removal}
+#remove doublets control
+list.so$mas <- list.so$mas[, list.so$mas@meta.data[, "class"] == "singlet"]
+
+#remove doublets depleted
+list.so$jc <- list.so$jc[, list.so$jc@meta.data[, "class"] == "singlet"]
+
+```
+
+
+## Cell cycle evaluation
+
+Depending on the experiment, cell cycle related influence may contribute to uninteresting variation in clustering. As a result, we can choose to regress the influence of cell cycle related genes in clustering.
+
+We will look at the S Phase and G2 Phase scores separately. Additionally, we can separate all cycling cells (S + G2 phase) cells from all non-cycling cells by subtracting the G2M and S scores. 
+
+```{r cell cycling control}
+
+#we quantified cells is S and G2 phase earlier, so we will look to see the proportion of cycling cells
+#control
+list.so$mas$cc.difference <- list.so$mas$S.Score - list.so$mas$G2M.Score
+VlnPlot(list.so$mas, features = c('S.Score','G2M.Score','cc.difference'), group.by = 'orig.ident')
+```
+
+```{r cell cycling depleted}
+
+#we quantified cells is S and G2 phase earlier, so we will look to see the proportion of cycling cells
+#depleted
+list.so$jc$cc.difference <- list.so$jc$S.Score - list.so$jc$G2M.Score
+VlnPlot(list.so$jc, features = c('S.Score','G2M.Score','cc.difference'), group.by = 'orig.ident')
+
+```
+
+We can see there is little influence of these PBMC cells. We can always choose to regress this influence out to our choosing when selecting vars.to.regress during SCTransform. For now, we won't regress cell cycle genes from the data.
+
+# Cell clustering using SCTransform workflow
+
+Now that we have done our cell QC filtering, we will repeat the SCTransform workflow to produce clustring results without the influence of doublets
+
+```{r final clustering}
+#SCTransform
+list.so <- lapply(X = list.so, FUN = function(x) {
+  x <- SCTransform(x, variable.features.n = NULL, variable.features.rv.th = 1.3, verbose = F)
+})
+
+#PCA
+list.so <- lapply(X = list.so, FUN = function(x) {
+  x <- RunPCA(x, assay = "SCT")
+})
+
+#generate UMAP coordinates
+list.so <- lapply(X = list.so, FUN = function(x) {
+  x <- RunUMAP(x, dims = 1:30)
+})
+
+#find k-nearest neighbors. For consistency, are going to use the same number of neighbors used in RunUMAP()
+list.so <- lapply(X = list.so, FUN = function(x) {
+  x <- FindNeighbors(x, dims = 1:30, k.param = 30)
+})
+
+#Find clusters using the louvain algorithm with multilevel refinement. Each clustering resolution will be stored in the metadata
+list.so <- lapply(X = list.so, FUN = function(x) {
+  x <- FindClusters(x, resolution = seq(0.1,1.2,0.1), algorithm = 2, verbose=F)
+})
+```
+
+We are going to initially visualize the UMAP plots of each sample separately. We are going to choose a relatively high resolution to showcase that with Jumpcode depletion we can extract more heterogeneity with samples that haven't approached sequence saturation.
+
+```{r UMAP plots of clustering results}
+
+Idents(list.so$mas) <- "SCT_snn_res.1"
+Idents(list.so$jc) <- "SCT_snn_res.1"
+
+#visualize UMAP of the control
+DimPlot(list.so$mas, label = T, pt.size = 0.75) + theme_classic() + ggtitle('MAS')
+
+#visualize UMAP of the depleted
+DimPlot(list.so$jc, label = T, pt.size = 0.75) + theme_classic() + ggtitle('JC')
+
+```
+
+# Harmony data projection
+
+From the UMAP plots, we see an additional 4 clusters!
+
+Depending on the seed and CPU processing, UMAPs can visually be generated differently between users. Additionally, UMAPs between control and depleted can sometimes be difficult to visually compare.
+
+As a result, we also want to ensure that the control and depleted conditions can be projected together so that experiments used with depletion can be compared to other previously sequenced samples. 
+
+To do so, we are going to use the Harmony algorithm (Korsunsky et. al., 2019) to project the control and depleted samples onto one another. 
+
+DO NOT attempt to find nearest neighbors or perform clustering on the harmony dimensions. This will effectively "batch correct" the observable clustering differences between the control and depleted conditions which we ultimately want to examine.
+
+Thus, use the clustering results generated prior running harmony.
+
+```{r haromy projection}
+library(harmony)
+
+#add condition variables
+list.so$mas$condition <- "MAS-Seq"
+list.so$jc$condition <- "MAS-Seq + JC"
+
+#set the default assay to the SCT slot
+DefaultAssay(list.so$mas) <- "SCT"
+DefaultAssay(list.so$jc) <- "SCT"
+
+#select variable features that are in common between each sample to aid in projection
+features <- SelectIntegrationFeatures(object.list = list.so, nfeatures = 2000)
+
+#merge seurat
+temp <- merge(x = list.so[[1]], y = list.so[[2]], merge.data=TRUE)
+
+#again make sure the default assay is the SCT slot after merging data
+DefaultAssay(temp) <- "SCT"
+
+#manually set variable features previously calculated
+VariableFeatures(temp) <- features
+
+#Run PCA on the merged data
+temp <- RunPCA(temp)
+
+#run harmony to correct the PCA
+harmonized_so <- RunHarmony(temp, group.by.vars = "condition", reduction.save="harmony", reduction="pca")
+
+#remove the temp merged object
+rm(temp)
+
+#run umap on the corrected PCA
+harmonized_so <- RunUMAP(harmonized_so, dims=1:30, reduction = "harmony", n.neighbors=30)
+
+#visualize the projected data split by condition
+DimPlot(harmonized_so, label = T, reduction = "umap", split.by = "condition", repel = T, label.size = 3, pt.size = 0.75) & NoLegend()
+```
+
+Now we can visually compare the clustering results between control and depletion!
