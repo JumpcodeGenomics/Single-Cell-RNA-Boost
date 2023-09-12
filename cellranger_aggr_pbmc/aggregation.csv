@@ -1,0 +1,7 @@
+sample_id,depletion,guideset,channel
+standard_1,10x_v3,no_depletion,ch1
+standard_2,10x_v3,no_depletion,ch2
+standard_3,10x_v3,no_depletion,ch3
+DepleteX_1,DepleteX,plus_NVG,ch1
+DepleteX_2,DepleteX,plus_NVG,ch2
+DepleteX_3,DepleteX,plus_NVG,ch3
