@@ -1,5 +1,5 @@
 ---
-title: "CRISPRclean Data Analysis Using R"
+title: "Analysis with 10x Data Using DepleteX (Cell Ranger < Cell Ranger v7)"
 output: 
   github_document:
     toc: true
@@ -18,7 +18,7 @@ We first want to assess some basic metrics such as UMIs/cell and Genes/cell to a
 
 We created a series of functions to assist with the workflow in assessing benefits of depletion.
 
-You can use a directory containing the barcodes.tsv, genes.tsv, and matrix.mtx file as output from CellRanger or filtered_feature_barcode_matrix.h5 file from CellRanger
+You can use a directory containing the barcodes.tsv, genes.tsv, and matrix.mtx file as output from Cell Ranger or filtered_feature_barcode_matrix.h5 file from Cell Ranger
 
 You will also need the gene target list provided by Jumpcode Genomics. Because we are targeting ~350 genes for removal, we experimentally remove UMIs associated with the targeted transcripts. We want to evaluate how reads are being redistributed for genes that have not been targeted with CRISPR. Thus, we should see a boost in both UMIs/cell and Genes/cell when considering all non-targeted transcripts. 
 
